@@ -5,15 +5,14 @@ Isolation Forest with a supervised Extra Trees classifier.
 Uses sensor values, trailing means, standard deviations, and changes. Labels are
 excluded from features. Windows never cross experiment boundaries.
 
-## Start on Windows
+## Quick start
 
-Open a terminal in this folder:
+With Python and pip installed, open a terminal in the project folder:
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe download_data.py
-.venv\Scripts\python.exe train.py
+python -m pip install -r requirements.txt
+python download_data.py
+python train.py
 ```
 
 Downloads require internet. The downloader skips existing files.
@@ -50,9 +49,9 @@ each candidate. `outputs/validation_search.json` also contains the Isolation
 Forest threshold search. Saved models include their smoothing configuration.
 
 For a normal-only training approach with labeled validation calibration:
-`train.py --unsupervised --output outputs_improved`.
+`python train.py --unsupervised --output outputs_improved`.
 For the original 99th-percentile threshold:
-`train.py --baseline --output outputs_baseline`.
+`python train.py --baseline --output outputs_baseline`.
 These modes use the same experiment split as the default.
 
 The first 29 readings of each experiment are omitted with the default window.
@@ -68,9 +67,9 @@ from the first retained labeled point; events during warm-up are not evaluated.
 event recall alone can look good for a detector that stays in alarm. Detection
 delay can be zero because an alarm was already active before the event.
 
-Try `train.py --baseline --window 60 --normal-quantile 0.995` for a more conservative
+Try `python train.py --baseline --window 60 --normal-quantile 0.995` for a more conservative
 baseline. Choose settings using validation experiments rather than repeatedly
-optimizing test results. Run checks with `.venv\Scripts\python.exe -m unittest`.
+optimizing test results. Run checks with `python -m unittest`.
 Next steps: compare a convolutional autoencoder, analyze errors per experiment,
 and add a live visualization after establishing a reliable baseline.
 
