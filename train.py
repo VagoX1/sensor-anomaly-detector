@@ -4,10 +4,12 @@ import json
 import os
 from pathlib import Path
 
+# Keep Matplotlib's cache inside the project unless the caller already chose a location.
 os.environ.setdefault('MPLCONFIGDIR', str(Path(__file__).resolve().parent / 'outputs' / '.matplotlib'))
 
 import joblib
 import matplotlib
+# Render plots to files without opening a graphical window.
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,10 +18,13 @@ from sklearn.ensemble import IsolationForest, ExtraTreesClassifier
 from sklearn.metrics import average_precision_score, precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
 
+# Default data/output paths work even when the script is launched from another folder.
 ROOT = Path(__file__).resolve().parent
 
 def smooth_scores(scores, span):
     """Trailing smoothing resets for every experiment; never sees future scores."""
+    # Larger spans reduce short spikes by mixing in more of the previous history.
+    # adjust=False computes each value recursively; span=1 leaves scores unchanged.
     return pd.Series(scores).ewm(span=span, adjust=False).mean().to_numpy()
 
 def calibrate(validation):
@@ -41,26 +46,40 @@ def calibrate(validation):
     return best, trials
 
 def score_model(model, x):
+    # Both model types must return scores where larger means more likely anomalous.
     if isinstance(model, IsolationForest):
+        # Isolation Forest normally gives lower scores to unusual observations.
         return -model.score_samples(x)
+    # Find the anomaly class (1) explicitly rather than assuming class ordering.
     return model.predict_proba(x)[:, list(model.classes_).index(1)]
 
 def load_experiment(path, window):
+    # SKAB separates columns with semicolons. Each file is one independent experiment.
     df = pd.read_csv(path, sep=';', parse_dates=['datetime'])
     if 'anomaly' not in df:
+        # This pipeline needs labels to select normal training windows and assess results.
         return None
+    # Put readings in chronological order before computing any trailing features.
     df = df.sort_values('datetime').set_index('datetime')
     if df.index.has_duplicates or df['anomaly'].isna().any():
         raise ValueError(f'Invalid timestamps or missing labels: {path}')
+    # Labels describe the answer and must never become model input features.
     sensors = df.drop(columns=['anomaly', 'changepoint'], errors='ignore').apply(pd.to_numeric)
     # Forward fill is causal; initial missing values remain unavailable.
     sensors = sensors.replace([np.inf, -np.inf], np.nan).ffill()
+    # A window contains the current reading plus window-1 earlier readings.
+    # min_periods requires a full window before its statistics become available.
     rolling = sensors.rolling(window, min_periods=window)
+    # For every sensor, combine its current value, recent average, variability,
+    # and change since the previous reading. Rows remain aligned by timestamp.
     x = pd.concat([sensors.add_suffix('_value'), rolling.mean().add_suffix('_mean'),
                    rolling.std().add_suffix('_std'), sensors.diff().add_suffix('_delta')], axis=1)
     # Never train on windows that contain an anomalous observation.
     clean = df['anomaly'].rolling(window, min_periods=window).max().eq(0)
+    # With binary labels, a rolling maximum of zero means the whole window is normal.
+    # Remove warm-up rows and any other rows whose features are still unavailable.
     available = x.notna().all(axis=1)
+    # Return aligned raw readings, model inputs, and the normal-window mask.
     return df.loc[available], x.loc[available], clean.loc[available]
 
 def event_metrics(y, predictions, timestamps):
@@ -79,6 +98,7 @@ def event_metrics(y, predictions, timestamps):
     return len(starts), len(delays), delays, int(false_starts.sum()), hours
 
 def main():
+    # Command-line options let the same pipeline run with different datasets/settings.
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', type=Path, default=ROOT / 'data')
     parser.add_argument('--output', type=Path, default=ROOT / 'outputs')
@@ -92,19 +112,28 @@ def main():
     experiments = {}
     for path in sorted(args.data.rglob('*.csv')):
         loaded = load_experiment(path, args.window)
+        # Keep nonempty labeled experiments with at least one retained anomaly.
+        # Relative paths distinguish files such as valve1/0.csv and valve2/0.csv.
         if loaded is not None and len(loaded[0]) and loaded[0]['anomaly'].eq(1).any():
             experiments[str(path.relative_to(args.data))] = loaded
     if len(experiments) < 5:
         raise SystemExit('At least five labeled experiments required. Run python download_data.py first.')
+    # Split whole experiments, so overlapping windows never leak across splits.
+    # Fixed seeds make the split repeatable for the same ordered list of files.
     train_ids, heldout = train_test_split(sorted(experiments), test_size=0.4, random_state=42)
     val_ids, test_ids = train_test_split(heldout, test_size=0.5, random_state=42)
+    # Models require the same input columns in the same order for every experiment.
     columns = experiments[train_ids[0]][1].columns
     if any(not x.columns.equals(columns) for _, x, _ in experiments.values()):
         raise ValueError('Experiments have different sensor columns.')
+    # Tuple entries are (raw readings, features, clean-window mask).
+    # .loc[mask] keeps only fully normal windows for the unsupervised detector.
     train_x = pd.concat([experiments[k][1].loc[experiments[k][2]] for k in train_ids])
     normal_val = pd.concat([experiments[k][1].loc[experiments[k][2]] for k in val_ids])
     if train_x.empty or normal_val.empty:
         raise ValueError('No clean normal windows in training or validation split.')
+    # Isolation Forest learns normal behavior without training on anomaly examples.
+    # n_jobs=-1 allows all available CPU cores to build the trees.
     model = IsolationForest(n_estimators=200, random_state=42, n_jobs=-1).fit(train_x)
     baseline_threshold = float(np.quantile(-model.score_samples(normal_val), args.normal_quantile))
     validation = [(experiments[k][0]['anomaly'].to_numpy(dtype=int),
@@ -113,9 +142,12 @@ def main():
     selected['model_type'] = 'isolation_forest'
     candidates = [dict(selected)]
     if not args.baseline and not args.unsupervised:
+        # Supervised training uses both normal and anomalous labeled windows.
         labeled_x = pd.concat([experiments[k][1] for k in train_ids])
         labeled_y = pd.concat([experiments[k][0]['anomaly'] for k in train_ids]).astype(int)
         for leaf_size in [5, 20, 50]:
+            # Larger leaves make predictions less sensitive to small groups of readings.
+            # Balanced class weights compensate for unequal label frequencies.
             classifier = ExtraTreesClassifier(n_estimators=200, min_samples_leaf=leaf_size,
                                              class_weight='balanced', random_state=42, n_jobs=-1)
             classifier.fit(labeled_x, labeled_y)
@@ -130,6 +162,7 @@ def main():
         selected = {'span': 1, 'threshold': baseline_threshold, 'model_type': 'isolation_forest'}
     threshold = selected['threshold']
     args.output.mkdir(parents=True, exist_ok=True)
+    # Save preprocessing settings alongside the model so later inference can match them.
     joblib.dump({'model': model, 'threshold': threshold, 'window': args.window,
                  'smoothing_span': selected['span'],
                  'configuration': selected,
@@ -184,4 +217,5 @@ def main():
     print(f'Plots, predictions, and model saved to {args.output}')
 
 if __name__ == '__main__':
+    # Importing helper functions does not start training; running this file does.
     main()
